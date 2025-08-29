@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Streaming Client • HLS Player</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji'; background: #0b1020; color: #e8ecf1; }
+    .wrap { max-width: 960px; margin: 32px auto; padding: 0 16px; }
+    h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.2px; margin: 0 0 16px; color: #e3f2fd; }
+    .card { background: #11182f; border: 1px solid #1d2a4d; border-radius: 12px; padding: 16px; box-shadow: 0 6px 16px rgba(0,0,0,0.25); }
+    .row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; margin-bottom: 12px; }
+    label { font-size: 12px; color: #9fb3c8; display: block; margin-bottom: 6px; }
+    input, select, button { height: 40px; border-radius: 10px; border: 1px solid #2b3c66; background: #0f152b; color: #e8ecf1; padding: 0 12px; }
+    input::placeholder { color: #6f7fa1; }
+    button { background: linear-gradient(135deg, #3a7bd5 0%, #00d2ff 100%); border: none; color: #081226; font-weight: 600; cursor: pointer; padding: 0 16px; }
+    button:hover { filter: brightness(1.05); }
+    .video-box { aspect-ratio: 16/9; background: #0a0f22; border: 1px solid #1d2a4d; border-radius: 12px; overflow: hidden; }
+    video { width: 100%; height: 100%; background: black; display: block; }
+    .meta { margin-top: 10px; display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: #a8bbd2; }
+    .err { margin-top: 8px; color: #ff8a80; font-size: 12px; min-height: 16px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>HLS Player</h1>
+    <div class="card">
+      <div class="row">
+        <div>
+          <label for="base">Server Base URL</label>
+          <input id="base" type="text" placeholder="http://localhost:4001" />
+        </div>
+        <div>
+          <label for="job">Job ID</label>
+          <input id="job" type="text" placeholder="e.g. 1693300000000_abcd12" />
+        </div>
+        <div>
+          <button id="play">Play</button>
+        </div>
+      </div>
+      <div class="row" style="grid-template-columns: 1fr 1fr;">
+        <div>
+          <label for="quality">Quality</label>
+          <select id="quality">
+            <option value="auto" selected>Auto</option>
+          </select>
+        </div>
+        <div>
+          <label for="url">Or direct .m3u8 URL</label>
+          <input id="url" type="text" placeholder="http://localhost:4001/assets/video/<jobId>/master.m3u8" />
+        </div>
+      </div>
+      <div class="video-box">
+        <video id="video" controls playsinline></video>
+      </div>
+      <div class="meta">
+        <span id="state">Idle</span>
+        <span id="info"></span>
+      </div>
+      <div id="error" class="err"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const video = $('video');
+    const playBtn = $('play');
+    const base = $('base');
+    const job = $('job');
+    const url = $('url');
+    const q = $('quality');
+    const state = $('state');
+    const info = $('info');
+    const errorBox = $('error');
+
+    let hls = null;
+
+    function setError(msg) {
+      errorBox.textContent = msg || '';
+      if (msg) console.error(msg);
+    }
+
+    function setState(s) { state.textContent = s; }
+
+    function cleanup() {
+      if (hls) {
+        hls.destroy();
+        hls = null;
+      }
+      video.removeAttribute('src');
+      video.load();
+      q.innerHTML = '<option value="auto" selected>Auto</option>';
+    }
+
+    function buildUrl() {
+      if (url.value.trim()) return url.value.trim();
+      const b = (base.value.trim() || 'http://localhost:4001').replace(/\/$/, '');
+      const j = job.value.trim();
+      if (!j) return '';
+      return `${b}/assets/videos/${encodeURIComponent(j)}/master.m3u8`;
+    }
+
+    function populateQualities() {
+      if (!hls) return;
+      const levels = hls.levels || [];
+      // Reset keep Auto
+      q.innerHTML = '<option value="auto" selected>Auto</option>';
+      levels.forEach((lvl, i) => {
+        const label = lvl.name || `${(lvl.height||0)}p @ ${(Math.round((lvl.bitrate||0)/1000))} kbps`;
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = label;
+        q.appendChild(opt);
+      });
+    }
+
+    q.addEventListener('change', () => {
+      if (!hls) return;
+      if (q.value === 'auto') {
+        hls.currentLevel = -1; // auto
+      } else {
+        const levelIndex = parseInt(q.value, 10);
+        if (!Number.isNaN(levelIndex)) hls.currentLevel = levelIndex;
+      }
+    });
+
+    playBtn.addEventListener('click', async () => {
+      setError('');
+      setState('Loading manifest...');
+      const src = buildUrl();
+      if (!src) {
+        setError('Please provide a Job ID or direct .m3u8 URL.');
+        setState('Idle');
+        return;
+      }
+
+      cleanup();
+
+      if (window.Hls && window.Hls.isSupported()) {
+        hls = new window.Hls({
+          // You may tune these for your environment
+          maxMaxBufferLength: 60,
+          backBufferLength: 30,
+          capLevelToPlayerSize: true,
+          enableWorker: true,
+        });
+        hls.on(window.Hls.Events.ERROR, (evt, data) => {
+          console.warn('HLS.js error', data);
+          if (data?.fatal) {
+            switch (data.type) {
+              case window.Hls.ErrorTypes.NETWORK_ERROR:
+                setError('Network error, trying to recover...');
+                hls.startLoad();
+                break;
+              case window.Hls.ErrorTypes.MEDIA_ERROR:
+                setError('Media error, trying to recover...');
+                hls.recoverMediaError();
+                break;
+              default:
+                setError('Fatal error. Reloading...');
+                hls.destroy();
+                break;
+            }
+          }
+        });
+        hls.on(window.Hls.Events.MANIFEST_PARSED, (_, data) => {
+          setState('Manifest parsed. Starting playback...');
+          populateQualities();
+          video.play().catch(() => {});
+          const levels = (hls.levels||[]);
+          if (levels.length) {
+            const best = levels.reduce((a, b) => (b.height||0) > (a.height||0) ? b : a, levels[0]);
+            info.textContent = `Best level: ${best.height||''}p @ ${Math.round((best.bitrate||0)/1000)} kbps`;
+          } else { info.textContent = ''; }
+        });
+        hls.on(window.Hls.Events.LEVEL_SWITCHED, (_, data) => {
+          const lvl = hls.levels?.[data.level];
+          if (lvl) info.textContent = `Now: ${lvl.height||''}p @ ${Math.round((lvl.bitrate||0)/1000)} kbps`;
+        });
+        hls.attachMedia(video);
+        hls.loadSource(src);
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari and some browsers
+        video.src = src;
+        video.addEventListener('loadedmetadata', () => video.play());
+      } else {
+        setError('HLS is not supported in this browser.');
+        setState('Idle');
+        return;
+      }
+    });
+
+    // Defaults for convenience
+    base.value = 'http://localhost:4001';
+  </script>
+</body>
+</html>
