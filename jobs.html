@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stream Client • Jobs</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:#0b1220; color:#e5edf5; }
+    header { padding:16px 20px; border-bottom:1px solid #1c2942; background:#0f172a; }
+    h1 { margin:0; font-size:18px; font-weight:600; }
+    main { padding:20px; max-width:1100px; margin:0 auto; }
+    fieldset { border:1px solid #1c2942; border-radius:10px; padding:16px; margin-bottom:20px; }
+    legend { padding: 0 6px; color:#9fb4cc; }
+    label { display:block; margin:8px 0 6px; color:#a8bbd2; font-size:14px; }
+    input[type="text"] { width:100%; box-sizing:border-box; background:#0d1526; border:1px solid #1c2942; color:#e5edf5; border-radius:8px; padding:10px; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { text-align:left; padding:10px; border-bottom:1px solid #1c2942; font-size:14px; }
+    th { color:#9fb4cc; font-weight:600; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .actions { display:flex; gap:6px; flex-wrap:wrap; }
+    button { background:#1e293b; border:0; color:#e5edf5; padding:8px 10px; border-radius:8px; cursor:pointer; font-weight:600; }
+    button.primary { background:#2b5fd9; }
+    button.danger { background:#b91c1c; }
+    a.link { color:#7dd3fc; text-decoration:none; }
+    .small { font-size:12px; color:#8aa2bf; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Jobs</h1>
+  </header>
+  <main>
+    <fieldset>
+      <legend>Server</legend>
+      <label for="baseUrl">Base URL</label>
+      <input id="baseUrl" type="text" placeholder="http://localhost:4001/api/v1" value="http://localhost:4001/api/v1" />
+      <div class="controls" style="margin-top:10px;">
+        <button id="refresh" class="primary">Refresh</button>
+        <a class="link" href="./upload.html" target="_blank">Open Upload</a>
+        <a class="link" href="./index.html" target="_blank">Open Player</a>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>All Jobs</legend>
+      <div class="small" style="margin-bottom:8px;">Click Play to open master playlist in new tab; use controls to manage a job.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>State</th>
+            <th>Progress</th>
+            <th>Updated</th>
+            <th>Output</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </fieldset>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const rows = $('rows');
+
+    function fmtTime(ts){ if(!ts) return '—'; const d=new Date(ts); return d.toLocaleString(); }
+    function masterUrl(base, id){ return `${base.replace(/\/$/, '')}/stream/hls/${id}/master.m3u8`; }
+
+    async function fetchJSON(url, opts){ const r=await fetch(url, opts); try{ return await r.json(); }catch{ return null; } }
+
+    async function load(){
+      const base = $('baseUrl').value.trim();
+      const json = await fetchJSON(`${base.replace(/\/$/, '')}/video/jobs`);
+      rows.innerHTML = '';
+      if(!json || json.success===false){ rows.innerHTML = `<tr><td colspan="6">Failed to fetch jobs</td></tr>`; return; }
+      const jobs = Array.isArray(json.data) ? json.data : json; // controller may return direct array
+      if(!jobs || jobs.length===0){ rows.innerHTML = `<tr><td colspan="6">No jobs</td></tr>`; return; }
+
+      for(const job of jobs){
+        const tr = document.createElement('tr');
+        const id = job.id || job.jobId || job?.["id"];
+        const m3u8 = masterUrl(base, id);
+        tr.innerHTML = `
+          <td class="mono small">${id}</td>
+          <td>${job.state}</td>
+          <td>${job.progressPct != null ? job.progressPct + '%' : '—'}</td>
+          <td class="small">${fmtTime(job.updatedAt)}</td>
+          <td class="mono small">${job.outputDir || '—'}</td>
+          <td>
+            <div class="actions">
+              <a class="link" href="${m3u8}" target="_blank">Play</a>
+              <button data-act="pause" data-id="${id}">Pause</button>
+              <button data-act="resume" data-id="${id}">Resume</button>
+              <button data-act="cancel" data-id="${id}" class="danger">Cancel</button>
+              <button data-act="delete" data-id="${id}">Delete</button>
+            </div>
+          </td>
+        `;
+        rows.appendChild(tr);
+      }
+    }
+
+    async function doAction(act, id){
+      const base = $('baseUrl').value.trim();
+      const root = `${base.replace(/\/$/, '')}/video/jobs/${encodeURIComponent(id)}`;
+      if(act==='delete'){
+        await fetch(`${root}`, { method: 'DELETE' });
+      } else {
+        await fetch(`${root}/${act}`, { method: 'POST' });
+      }
+      await load();
+    }
+
+    $('refresh').addEventListener('click', load);
+
+    rows.addEventListener('click', (e)=>{
+      const t = e.target;
+      if(t.tagName === 'BUTTON' && t.dataset.id){
+        doAction(t.dataset.act, t.dataset.id);
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stream Client • Upload & Job Control</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:#0b1220; color:#e5edf5; }
+    header { padding:16px 20px; border-bottom:1px solid #1c2942; background:#0f172a; }
+    h1 { margin:0; font-size:18px; font-weight:600; }
+    main { padding:20px; max-width:980px; margin:0 auto; }
+    fieldset { border:1px solid #1c2942; border-radius:10px; padding:16px; margin-bottom:20px; }
+    legend { padding: 0 6px; color:#9fb4cc; }
+    label { display:block; margin:8px 0 6px; color:#a8bbd2; font-size:14px; }
+    input[type="text"], input[type="file"] { width:100%; box-sizing:border-box; background:#0d1526; border:1px solid #1c2942; color:#e5edf5; border-radius:8px; padding:10px; }
+    button { background:#2b5fd9; border:0; color:white; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:600; }
+    button.secondary { background:#1e293b; }
+    button.danger { background:#b91c1c; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .row { display:flex; gap:10px; align-items:center; }
+    .row > * { flex:1; }
+    .muted { color:#8aa2bf; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .status { padding:12px; border:1px solid #1c2942; border-radius:8px; background:#0d1526; }
+    .grid { display:grid; grid-template-columns: 160px 1fr; gap:8px 16px; align-items:center; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    a.link { color:#7dd3fc; text-decoration:none; }
+    .small { font-size:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Upload & Control Job</h1>
+  </header>
+  <main>
+    <fieldset>
+      <legend>Server</legend>
+      <label for="baseUrl">Base URL</label>
+      <input id="baseUrl" type="text" placeholder="http://localhost:4001/api/v1" value="http://localhost:4001/api/v1" />
+    </fieldset>
+
+    <fieldset>
+      <legend>Upload</legend>
+      <div class="grid">
+        <label for="file">Video file</label>
+        <input id="file" type="file" accept="video/*" />
+        <div></div>
+        <div class="small muted">Max 5 GB. Requires FFmpeg/FFprobe on server.</div>
+      </div>
+      <div style="margin-top:12px;" class="row">
+        <button id="uploadBtn">Upload & Enqueue</button>
+        <button id="clearBtn" class="secondary">Clear</button>
+      </div>
+      <div id="uploadMsg" class="small muted" style="margin-top:8px;"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Job</legend>
+      <div class="grid">
+        <span class="muted">Job ID</span>
+        <div class="mono" id="jobId">—</div>
+        <span class="muted">State</span>
+        <div id="state">—</div>
+        <span class="muted">Progress</span>
+        <div id="progress">—</div>
+        <span class="muted">Output</span>
+        <div id="outputDir" class="mono small">—</div>
+        <span class="muted">Master .m3u8</span>
+        <div id="masterUrlWrap">—</div>
+      </div>
+      <div class="actions" style="margin-top:12px;">
+        <button id="pauseBtn">Pause</button>
+        <button id="resumeBtn">Resume</button>
+        <button id="cancelBtn" class="danger">Cancel</button>
+        <button id="deleteBtn" class="secondary">Delete</button>
+        <button id="refreshBtn" class="secondary">Refresh</button>
+      </div>
+      <div class="status small" style="margin-top:12px;">
+        <div class="muted">Raw</div>
+        <pre id="raw" class="mono" style="white-space:pre-wrap; margin:6px 0 0;"></pre>
+      </div>
+    </fieldset>
+
+    <p class="small muted">Tip: Open the player at <a class="link" href="./index.html" target="_blank">index.html</a> and paste the master URL.</p>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const stateEl = $('state');
+    const progressEl = $('progress');
+    const jobIdEl = $('jobId');
+    const rawEl = $('raw');
+    const outputDirEl = $('outputDir');
+    const masterWrap = $('masterUrlWrap');
+
+    let pollTimer = null;
+
+    function masterUrl(base, id) {
+      return `${base.replace(/\/$/, '')}/stream/hls/${id}/master.m3u8`;
+    }
+
+    function setJob(id) {
+      jobIdEl.textContent = id || '—';
+      if (!id) return;
+      const base = $('baseUrl').value.trim();
+      const m3u8 = masterUrl(base, id);
+      masterWrap.innerHTML = `<a class="link mono" href="${m3u8}" target="_blank">${m3u8}</a>`;
+    }
+
+    async function upload() {
+      const base = $('baseUrl').value.trim();
+      const f = $('file').files[0];
+      if (!base) return alert('Enter Base URL');
+      if (!f) return alert('Choose a video file');
+
+      const form = new FormData();
+      form.append('file', f);
+      $('uploadBtn').disabled = true;
+      $('uploadMsg').textContent = 'Uploading...';
+      try {
+        const res = await fetch(`${base.replace(/\/$/, '')}/video/upload`, { method: 'POST', body: form });
+        const json = await res.json();
+        rawEl.textContent = JSON.stringify(json, null, 2);
+        if (!json.success) throw new Error(json.error || 'Upload failed');
+        const { jobId, outputDir } = json.data || {};
+        setJob(jobId);
+        outputDirEl.textContent = outputDir || '—';
+        startPolling();
+        $('uploadMsg').textContent = 'Uploaded and enqueued.';
+      } catch (e) {
+        console.error(e);
+        $('uploadMsg').textContent = 'Error: ' + (e?.message || e);
+      } finally {
+        $('uploadBtn').disabled = false;
+      }
+    }
+
+    async function getJob(id) {
+      const base = $('baseUrl').value.trim();
+      const res = await fetch(`${base.replace(/\/$/, '')}/video/jobs/${encodeURIComponent(id)}`);
+      return res.json();
+    }
+
+    function updateState(job) {
+      if (!job) return;
+      stateEl.textContent = job.state;
+      progressEl.textContent = (job.progressPct != null ? job.progressPct + '%' : '—');
+      rawEl.textContent = JSON.stringify(job, null, 2);
+    }
+
+    async function refresh() {
+      const id = jobIdEl.textContent;
+      if (!id || id === '—') return;
+      try {
+        const json = await getJob(id);
+        if (json && json.success === false && json.error) throw new Error(json.error);
+        updateState(json);
+      } catch (e) { console.error(e); }
+    }
+
+    function startPolling() {
+      stopPolling();
+      pollTimer = setInterval(async () => {
+        await refresh();
+        const state = stateEl.textContent;
+        if (['completed','failed','canceled'].includes(state)) stopPolling();
+      }, 2000);
+    }
+    function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+    async function action(path) {
+      const id = jobIdEl.textContent;
+      if (!id || id === '—') return alert('No job selected');
+      const base = $('baseUrl').value.trim();
+      const url = `${base.replace(/\/$/, '')}${path.replace(':id', encodeURIComponent(id))}`;
+      const method = path.endsWith('/delete') ? 'DELETE' : 'POST';
+      const res = await fetch(url, { method });
+      const json = await res.json();
+      rawEl.textContent = JSON.stringify(json, null, 2);
+      await refresh();
+    }
+
+    $('uploadBtn').addEventListener('click', upload);
+    $('clearBtn').addEventListener('click', () => {
+      $('file').value = '';
+      $('uploadMsg').textContent = '';
+      stopPolling();
+      setJob('');
+      stateEl.textContent = '—';
+      progressEl.textContent = '—';
+      outputDirEl.textContent = '—';
+      masterWrap.textContent = '—';
+      rawEl.textContent = '';
+    });
+    $('pauseBtn').addEventListener('click', () => action('/video/jobs/:id/pause'));
+    $('resumeBtn').addEventListener('click', () => action('/video/jobs/:id/resume'));
+    $('cancelBtn').addEventListener('click', () => action('/video/jobs/:id/cancel'));
+    $('deleteBtn').addEventListener('click', () => action('/video/jobs/:id'));
+    $('refreshBtn').addEventListener('click', refresh);
+  </script>
+</body>
+</html>
